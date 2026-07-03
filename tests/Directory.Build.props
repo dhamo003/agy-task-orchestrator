@@ -1,0 +1,9 @@
+<Project>
+  <!-- Import parent props -->
+  <Import Project="$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)../'))" />
+
+  <PropertyGroup>
+    <!-- Suppress CA1707 (underscores in identifiers) for test projects — standard xUnit naming convention -->
+    <NoWarn>$(NoWarn);CA1707</NoWarn>
+  </PropertyGroup>
+</Project>

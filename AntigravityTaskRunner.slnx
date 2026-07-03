@@ -1,0 +1,17 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Runner.Configuration/Runner.Configuration.csproj" />
+    <Project Path="src/Runner.Console/Runner.Console.csproj" />
+    <Project Path="src/Runner.Core/Runner.Core.csproj" />
+    <Project Path="src/Runner.Logging/Runner.Logging.csproj" />
+    <Project Path="src/Runner.Markdown/Runner.Markdown.csproj" />
+    <Project Path="src/Runner.Terminal/Runner.Terminal.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Runner.Console.Tests/Runner.Console.Tests.csproj" />
+    <Project Path="tests/Runner.Core.Tests/Runner.Core.Tests.csproj" />
+    <Project Path="tests/Runner.Logging.Tests/Runner.Logging.Tests.csproj" />
+    <Project Path="tests/Runner.Markdown.Tests/Runner.Markdown.Tests.csproj" />
+    <Project Path="tests/Runner.Terminal.Tests/Runner.Terminal.Tests.csproj" />
+  </Folder>
+</Solution>

@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>AntigravityTaskRunner.Markdown</RootNamespace>
+    <AssemblyName>Runner.Markdown</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Runner.Configuration\Runner.Configuration.csproj" />
+  </ItemGroup>
+
+</Project>

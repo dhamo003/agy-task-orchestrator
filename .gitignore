@@ -1,0 +1,23 @@
+# Build output
+bin/
+obj/
+
+# Visual Studio
+.vs/
+
+# User files
+*.user
+*.suo
+
+# Logs
+*.log
+logs/
+
+# Rider
+.idea/
+
+# Publish output
+publish/
+
+# Test Results
+TestResults/
