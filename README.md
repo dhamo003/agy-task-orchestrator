@@ -2,11 +2,11 @@
 
 **Unattended, verified, crash-recoverable task orchestration for the Antigravity CLI (`agy`).**
 
-Antigravity Task Runner is a .NET 8 console application that drives the [Antigravity CLI](https://antigravitylab.net/) (`agy`) through a Markdown checklist (`tasks.md`) **one task at a time**. Each task gets a brand-new `agy` session, a focused prompt, and a multi-stage verification pass (completion marker → real file changes → meaningful implementation diff → build → tests) before the checklist is updated and the runner moves on. If anything fails, the pipeline **halts** rather than skipping the task, and the full state is checkpointed so a crash, a Ctrl+C, or an AI rate limit can be resumed exactly where it left off.
+Antigravity Task Runner is a .NET 8 console application that drives the Antigravity CLI (`agy`) through a Markdown checklist (`tasks.md`) **one task at a time**. Each task gets a brand-new `agy` session, a focused prompt, and a multi-stage verification pass (completion marker → real file changes → meaningful implementation diff → build → tests) before the checklist is updated and the runner moves on. If anything fails, the pipeline **halts** rather than skipping the task, and the full state is checkpointed so a crash, a Ctrl+C, or an AI rate limit can be resumed exactly where it left off.
 
 This document is the canonical reference for installing, configuring, running, and extending the project. A much longer narrative write-up — architecture deep dive, sequence diagrams, security/performance considerations, and a full module-by-module tour — lives in [`docs/Project-Guide.md`](docs/Project-Guide.md).
 
-> **Status:** early-stage personal project (2 commits at the time of writing), not yet published under a license. See [License](#license) and [Known Limitations & Audit Notes](#known-limitations--audit-notes) before relying on it.
+> **Status:** early-stage personal project (2 commits at the time of writing), licensed under the [MIT License](LICENSE). See [Known Limitations & Audit Notes](#known-limitations--audit-notes) before relying on it.
 
 ---
 
@@ -613,7 +613,9 @@ There is no `CONTRIBUTING.md`, issue template, or CI workflow in the repository 
 
 ## License
 
-**No `LICENSE` file is present in this repository.** Under default copyright law, that means all rights are reserved and the project is **not** open source in a legally usable sense, regardless of being hosted on a public GitHub repository. If the intent is for others to clone, use, and contribute to this project (which this documentation assumes), add a `LICENSE` file — a permissive choice such as MIT or Apache-2.0 is standard for tooling like this, but that choice is the maintainer's to make.
+This project is licensed under the **MIT License** — see [`LICENSE`](LICENSE) for the full text.
+
+In short: anyone may use, copy, modify, merge, publish, distribute, sublicense, and even sell copies of this software, for free, for any purpose (including commercial), as long as the original copyright notice and license text are kept in any copy or substantial portion they redistribute. The software is provided *as is*, with no warranty — the copyright holder is not liable for anything that happens as a result of someone else using it.
 
 ---
 
@@ -629,7 +631,7 @@ This section exists because the brief for this documentation explicitly asked fo
 - **`ModelOptions.FallbackModels` is defined and validated but never consumed.** There is no fallback-model logic anywhere in `Runner.Terminal` or `Runner.Core`.
 - **Two parallel, differently-scoped state-persistence mechanisms exist.** `Runner.Core`'s `ExecutionCheckpoint`/`JsonCheckpointStore` is what `SequentialOrchestrator` actually uses for crash recovery. `Runner.Markdown`'s `RunnerState`/`JsonStateManager` (writing `runner-state.json`) is fully implemented and registered in DI but is not invoked anywhere in the current orchestration path — it appears to be superseded, earlier-generation code left in place.
 - **Exit code `1` ("finished with some tasks failed") is defined but effectively unreachable** given the current fail-stop design: the moment any task fails, the pipeline halts (exit code `2`) within the same run, before a second task could exist to make the "some failed, but the run finished" condition true. This isn't necessarily a bug, but the exit-code contract as written implies a scenario the current control flow cannot produce.
-- **No `LICENSE`, `CONTRIBUTING.md`, `CHANGELOG`, `.editorconfig`, `global.json`, or CI workflow (e.g. GitHub Actions) exists in the repository.** The `git` history contains exactly two commits ("Initial commit", "Bug fixes"). Treat this as an early-stage, pre-collaboration codebase.
+- **No `CONTRIBUTING.md`, `CHANGELOG`, `.editorconfig`, `global.json`, or CI workflow (e.g. GitHub Actions) exists in the repository** (a `LICENSE` file — MIT — has been added). The `git` history contains exactly two commits ("Initial commit", "Bug fixes"). Treat this as an early-stage, pre-collaboration codebase.
 - **The existing (pre-rewrite) README's claim of "160 tests"** could not be reproduced exactly; a direct count of `[Fact]`/`[Theory]` attributes across all five test projects returns **155**. `[Theory]` methods with multiple `[InlineData]` rows execute more individual test *cases* than this method count, so the true number of test cases `dotnet test` reports at run time is likely higher than 155 — but 155 is the verifiable method count as of this writing.
 
 These are documented here, and referenced from the relevant sections above, rather than silently corrected or omitted — per this documentation's own standard of not asserting behavior that isn't backed by the actual source.

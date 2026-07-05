@@ -712,7 +712,7 @@ Consolidated from the discoveries referenced throughout this guide and the READM
 - **Two independent, differently-scoped persistence mechanisms exist** (`Runner.Core`'s checkpoint system, actually used; `Runner.Markdown`'s `JsonStateManager`, fully implemented, registered in DI, but never called from the orchestration path).
 - **Three of five test projects require the .NET 10 SDK**, while the product itself and the other two test projects target `.NET 8.0` — very likely unintentional drift rather than a deliberate split.
 - **Exit code `1` is defined but effectively unreachable** in the current fail-stop design (see the README's audit notes for the precise reasoning).
-- **No CI, no LICENSE, no CONTRIBUTING.md, no `.editorconfig`, no `global.json`.** The repository's `git log` contains exactly two commits at the time of writing.
+- **No CI, no CONTRIBUTING.md, no `.editorconfig`, no `global.json`** (a `LICENSE` file — MIT — has since been added). The repository's `git log` contains exactly two commits at the time of writing.
 - **No built-in protection against two instances targeting the same workspace concurrently.**
 - **No sandboxing of the agent's own capabilities** — see [Security Considerations](#19-security-considerations).
 - **Comment/whitespace normalization for the "meaningful diff" check is regex-based, not a real parser**, per extension family, and can be fooled by unusual syntax (e.g. comment-like sequences inside string literals).
@@ -724,7 +724,7 @@ Consolidated from the discoveries referenced throughout this guide and the READM
 Reasonable, grounded next steps implied directly by the gaps above (this is guidance inferred from the current codebase's own trajectory, not an official commitment from the maintainer):
 
 1. **Wire `--verbose` to something real** — at minimum, lowering the console sink's minimum level to `Debug`/`Trace` when set.
-2. **Add a `LICENSE` file** if the intent is for this to be a usable open-source project, plus a minimal `CONTRIBUTING.md` reflecting the process already described in the README.
+2. **Add a minimal `CONTRIBUTING.md`** reflecting the process already described in the README (a `LICENSE` file — MIT — has already been added).
 3. **Cross-platform session teardown** — replace the Windows-only `taskkill /T /F` path with a POSIX equivalent (process-group kill via `kill(-pid)`) gated on `OperatingSystem.IsLinux()`/`IsMacOS()`, and swap the hardcoded `cmd.exe`/`cd /d` invocations for a shell-appropriate equivalent, before advertising Linux/macOS support.
 4. **Reconcile the test-project target frameworks** — either move all five test projects to a single consistent TFM, or make the `net10.0` choice deliberate and documented if there's a specific reason for it.
 5. **Add a `global.json`** pinning the exact SDK version(s) the project expects, removing ambiguity for new contributors about which SDKs are actually required.
