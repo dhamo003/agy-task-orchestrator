@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Text;
 using AntigravityTaskRunner.Configuration;
 using Microsoft.Extensions.FileSystemGlobbing;
 using Microsoft.Extensions.Logging;
@@ -7,17 +8,29 @@ using Microsoft.Extensions.Options;
 namespace AntigravityTaskRunner.Terminal.Workspace;
 
 /// <summary>
-/// Analyzes workspace files based on timestamps and/or hashes to detect changes.
+/// Snapshot-diff based workspace analyzer. Content hashes (not timestamps) are the
+/// source of truth so results are deterministic, and rename detection plus
+/// normalized-content hashing let verification reject formatting-only edits.
 /// </summary>
 public class FileChangeWorkspaceAnalyzer : IWorkspaceAnalyzer
 {
+    /// <summary>Files larger than this are hashed but never content-normalized.</summary>
+    private const long MaxNormalizableBytes = 2 * 1024 * 1024;
+
     private readonly WorkspaceOptions _options;
+    private readonly string _tasksFileName;
+    private readonly SourceFileClassifier _classifier;
     private readonly ILogger<FileChangeWorkspaceAnalyzer> _logger;
     private readonly Matcher _matcher;
 
-    public FileChangeWorkspaceAnalyzer(IOptions<RunnerOptions> options, ILogger<FileChangeWorkspaceAnalyzer> logger)
+    public FileChangeWorkspaceAnalyzer(
+        IOptions<RunnerOptions> options,
+        SourceFileClassifier classifier,
+        ILogger<FileChangeWorkspaceAnalyzer> logger)
     {
         _options = options.Value.Workspace;
+        _tasksFileName = Path.GetFileName(options.Value.TasksFile);
+        _classifier = classifier;
         _logger = logger;
 
         _matcher = new Matcher(StringComparison.OrdinalIgnoreCase);
@@ -51,82 +64,144 @@ public class FileChangeWorkspaceAnalyzer : IWorkspaceAnalyzer
             if (!fileInfo.Exists) continue; // Might have been deleted concurrently
 
             var relPath = Path.GetRelativePath(rootDir.FullName, fileInfo.FullName);
-            
+
             string? hash = null;
+            string? normalizedHash = null;
             if (_options.DetectStrategy is WorkspaceDetectStrategy.Hash or WorkspaceDetectStrategy.Both)
             {
-                hash = await ComputeHashAsync(fileInfo.FullName, token);
+                (hash, normalizedHash) = await ComputeHashesAsync(fileInfo, relPath, token);
             }
 
             files[relPath] = new FileSnapshot(
                 relPath,
                 fileInfo.LastWriteTimeUtc,
                 fileInfo.Length,
-                hash
+                hash,
+                normalizedHash
             );
         }
 
         return new WorkspaceSnapshot(files, DateTime.UtcNow);
     }
 
-    public IReadOnlyList<string> GetChanges(WorkspaceSnapshot before, WorkspaceSnapshot after)
+    public WorkspaceChangeSet GetChangeSet(WorkspaceSnapshot before, WorkspaceSnapshot after)
     {
-        var changedFiles = new List<string>();
+        var changes = new List<FileChange>();
+        var created = new List<FileSnapshot>();
+        var deleted = new List<FileSnapshot>();
 
-        // Check for added or modified files
         foreach (var (path, afterFile) in after.Files)
         {
+            if (IsExcludedFromVerification(path)) continue;
+
             if (!before.Files.TryGetValue(path, out var beforeFile))
             {
-                changedFiles.Add(path); // Added
+                created.Add(afterFile);
+            }
+            else if (ContentDiffers(beforeFile, afterFile))
+            {
+                changes.Add(new FileChange(path, FileChangeKind.Modified,
+                    IsMeaningful: IsModificationMeaningful(beforeFile, afterFile)));
+            }
+        }
+
+        foreach (var (path, beforeFile) in before.Files)
+        {
+            if (IsExcludedFromVerification(path)) continue;
+
+            if (!after.Files.ContainsKey(path))
+            {
+                deleted.Add(beforeFile);
+            }
+        }
+
+        // Rename detection: a deleted file whose content hash matches a created file.
+        var unmatchedCreated = new List<FileSnapshot>(created);
+        foreach (var del in deleted)
+        {
+            FileSnapshot? match = del.Hash is null
+                ? null
+                : unmatchedCreated.FirstOrDefault(c => c.Hash == del.Hash);
+
+            if (match is not null)
+            {
+                unmatchedCreated.Remove(match);
+                changes.Add(new FileChange(match.RelativePath, FileChangeKind.Renamed,
+                    OldPath: del.RelativePath,
+                    IsMeaningful: IsImplementationFile(match.RelativePath)));
             }
             else
             {
-                if (_options.DetectStrategy is WorkspaceDetectStrategy.Hash or WorkspaceDetectStrategy.Both)
-                {
-                    if (beforeFile.Hash != afterFile.Hash)
-                    {
-                        changedFiles.Add(path); // Modified by hash
-                        continue;
-                    }
-                }
-                
-                if (_options.DetectStrategy is WorkspaceDetectStrategy.Timestamp or WorkspaceDetectStrategy.Both)
-                {
-                    if (beforeFile.LastWriteTimeUtc != afterFile.LastWriteTimeUtc || beforeFile.Length != afterFile.Length)
-                    {
-                        changedFiles.Add(path); // Modified by timestamp/size
-                    }
-                }
+                changes.Add(new FileChange(del.RelativePath, FileChangeKind.Deleted,
+                    IsMeaningful: IsImplementationFile(del.RelativePath)));
             }
         }
 
-        // Check for deleted files
-        foreach (var (path, _) in before.Files)
+        foreach (var add in unmatchedCreated)
         {
-            if (!after.Files.ContainsKey(path))
-            {
-                changedFiles.Add(path); // Deleted
-            }
+            changes.Add(new FileChange(add.RelativePath, FileChangeKind.Created,
+                IsMeaningful: IsImplementationFile(add.RelativePath)));
         }
 
-        return changedFiles;
+        return new WorkspaceChangeSet(changes);
     }
 
-    private static async Task<string> ComputeHashAsync(string filePath, CancellationToken token)
+    private bool IsExcludedFromVerification(string relativePath) =>
+        _classifier.IsIgnored(relativePath) ||
+        string.Equals(Path.GetFileName(relativePath), _tasksFileName, StringComparison.OrdinalIgnoreCase);
+
+    private bool IsImplementationFile(string relativePath) =>
+        _classifier.IsSource(relativePath) && !_classifier.IsDocumentation(relativePath);
+
+    private bool ContentDiffers(FileSnapshot before, FileSnapshot after)
+    {
+        if (_options.DetectStrategy is WorkspaceDetectStrategy.Hash or WorkspaceDetectStrategy.Both
+            && before.Hash is not null && after.Hash is not null)
+        {
+            return before.Hash != after.Hash;
+        }
+
+        return before.LastWriteTimeUtc != after.LastWriteTimeUtc || before.Length != after.Length;
+    }
+
+    private bool IsModificationMeaningful(FileSnapshot before, FileSnapshot after)
+    {
+        if (!IsImplementationFile(after.RelativePath))
+        {
+            return false;
+        }
+
+        // When both normalized hashes are available, a modification is meaningful only
+        // when the normalized (comment/whitespace-stripped) content actually changed.
+        if (before.NormalizedHash is not null && after.NormalizedHash is not null)
+        {
+            return before.NormalizedHash != after.NormalizedHash;
+        }
+
+        return true; // Fall back: raw content differs and file is a source file.
+    }
+
+    private async Task<(string? Hash, string? NormalizedHash)> ComputeHashesAsync(
+        FileInfo fileInfo, string relativePath, CancellationToken token)
     {
         try
         {
-            using var stream = File.OpenRead(filePath);
-            using var sha256 = SHA256.Create();
-            var hashBytes = await sha256.ComputeHashAsync(stream, token);
-            return Convert.ToHexString(hashBytes);
+            var bytes = await File.ReadAllBytesAsync(fileInfo.FullName, token);
+            var hash = Convert.ToHexString(SHA256.HashData(bytes));
+
+            string? normalizedHash = null;
+            if (fileInfo.Length <= MaxNormalizableBytes && _classifier.IsSource(relativePath))
+            {
+                var content = Encoding.UTF8.GetString(bytes);
+                normalizedHash = _classifier.ComputeNormalizedHash(relativePath, content);
+            }
+
+            return (hash, normalizedHash);
         }
         catch (IOException)
         {
-            // If the file is locked, just return a unique value or null. 
-            // Better to assume it changed if we can't read it.
-            return Guid.NewGuid().ToString();
+            // If the file is locked, assume it changed: return a unique value.
+            return (Guid.NewGuid().ToString(), null);
         }
     }
 }

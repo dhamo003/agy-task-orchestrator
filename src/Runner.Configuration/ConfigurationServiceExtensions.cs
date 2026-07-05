@@ -25,11 +25,14 @@ public static class ConfigurationServiceExtensions
         services.Configure<RunnerOptions>(section);
         services.Configure<RetryOptions>(section.GetSection(nameof(RunnerOptions.Retry)));
         services.Configure<TimeoutOptions>(section.GetSection(nameof(RunnerOptions.Timeout)));
-        services.Configure<ParallelExecutionOptions>(section.GetSection(nameof(RunnerOptions.Parallel)));
         services.Configure<ModelOptions>(section.GetSection(nameof(RunnerOptions.ModelConfig)));
         services.Configure<WorkspaceOptions>(section.GetSection(nameof(RunnerOptions.Workspace)));
         services.Configure<PromptTemplateOptions>(section.GetSection(nameof(RunnerOptions.PromptTemplate)));
         services.Configure<CompletionOptions>(section.GetSection(nameof(RunnerOptions.Completion)));
+        services.Configure<VerificationOptions>(section.GetSection(nameof(RunnerOptions.Verification)));
+        services.Configure<BuildValidationOptions>(section.GetSection(nameof(RunnerOptions.Build)));
+        services.Configure<LimitOptions>(section.GetSection(nameof(RunnerOptions.Limits)));
+        services.Configure<CheckpointOptions>(section.GetSection(nameof(RunnerOptions.Checkpoint)));
 
         // Register validator for fail-fast on bad configuration
         services.AddSingleton<IValidateOptions<RunnerOptions>, RunnerOptionsValidator>();

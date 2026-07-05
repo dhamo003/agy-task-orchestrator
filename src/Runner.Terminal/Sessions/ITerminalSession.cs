@@ -6,6 +6,18 @@ namespace AntigravityTaskRunner.Terminal.Sessions;
 public interface ITerminalSession : IDisposable
 {
     /// <summary>
+    /// Optionally overrides what the session spawns when <see cref="StartAsync"/> is called.
+    /// When not called, the session spawns the configured shell (interactive mode). When called
+    /// (one-shot mode), the session spawns <paramref name="app"/> directly with
+    /// <paramref name="commandLine"/> passed as distinct argv entries — no shell, no quoting.
+    /// Must be invoked before <see cref="StartAsync"/>.
+    /// </summary>
+    /// <param name="app">The executable to launch (e.g. the agent command).</param>
+    /// <param name="commandLine">The arguments, each passed as a separate argv element.</param>
+    /// <param name="workingDirectory">Working directory for the process, or null for the default.</param>
+    void ConfigureSpawn(string app, IReadOnlyList<string> commandLine, string? workingDirectory);
+
+    /// <summary>
     /// Starts the terminal session.
     /// </summary>
     /// <param name="token">Cancellation token to cancel startup.</param>

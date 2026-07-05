@@ -114,4 +114,56 @@ public class MarkdownTaskParserTests
             File.Delete(tempFile);
         }
     }
+
+    [Fact]
+    public async Task GetNextTask_ReturnsFailedTask_SoTheOrchestratorNeverSkipsIt()
+    {
+        // A Failed ([!]) task blocks the pipeline: the parser surfaces it as the next task
+        // so the ORCHESTRATOR can halt (default) or re-attempt it (--retry-failed). It is
+        // never silently skipped in favour of later pending tasks.
+        var tempFile = Path.GetTempFileName();
+        var content = @"
+- [x] Task 1 Done
+- [!] Task 2 Failed
+- [ ] Task 3 Pending
+";
+        await File.WriteAllTextAsync(tempFile, content);
+
+        try
+        {
+            var phases = await _parser.ParseAsync(tempFile);
+            var nextTask = _parser.GetNextTask(phases);
+
+            nextTask.Should().NotBeNull();
+            nextTask!.DisplayText.Should().Be("Task 2 Failed");
+            nextTask.Status.Should().Be(TaskStatus.Failed);
+        }
+        finally
+        {
+            File.Delete(tempFile);
+        }
+    }
+
+    [Fact]
+    public async Task GetNextTask_ReturnsNull_OnlyWhenEverythingIsCompletedOrSkipped()
+    {
+        var tempFile = Path.GetTempFileName();
+        var content = @"
+- [x] Task 1 Done
+- [-] Task 2 Skipped
+";
+        await File.WriteAllTextAsync(tempFile, content);
+
+        try
+        {
+            var phases = await _parser.ParseAsync(tempFile);
+            var nextTask = _parser.GetNextTask(phases);
+
+            nextTask.Should().BeNull();
+        }
+        finally
+        {
+            File.Delete(tempFile);
+        }
+    }
 }

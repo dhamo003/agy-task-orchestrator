@@ -71,24 +71,29 @@ public class ConfigurationServiceExtensionsTests
     }
 
     [Fact]
-    public void AddRunnerConfiguration_WithParallelConfig_ShouldBindEnumCorrectly()
+    public void AddRunnerConfiguration_WithProductionSections_ShouldBindCorrectly()
     {
         var config = BuildConfiguration(new Dictionary<string, string?>
         {
             ["Runner:TasksFile"] = "tasks.md",
             ["Runner:Model"] = "test-model",
-            ["Runner:Parallel:MaxWorkers"] = "4",
-            ["Runner:Parallel:Mode"] = "Parallel",
+            ["Runner:Build:Enabled"] = "false",
+            ["Runner:Limits:PauseSeconds"] = "120",
+            ["Runner:Limits:MaxPausesPerTask"] = "5",
+            ["Runner:Checkpoint:Directory"] = ".custom-ckpt",
+            ["Runner:Verification:RequireMeaningfulDiff"] = "false",
         });
 
         var services = new ServiceCollection();
         services.AddRunnerConfiguration(config);
         var provider = services.BuildServiceProvider();
 
-        var parallelOptions = provider.GetRequiredService<IOptions<ParallelExecutionOptions>>().Value;
-
-        parallelOptions.MaxWorkers.Should().Be(4);
-        parallelOptions.Mode.Should().Be(ExecutionMode.Parallel);
+        provider.GetRequiredService<IOptions<BuildValidationOptions>>().Value.Enabled.Should().BeFalse();
+        var limits = provider.GetRequiredService<IOptions<LimitOptions>>().Value;
+        limits.PauseSeconds.Should().Be(120);
+        limits.MaxPausesPerTask.Should().Be(5);
+        provider.GetRequiredService<IOptions<CheckpointOptions>>().Value.Directory.Should().Be(".custom-ckpt");
+        provider.GetRequiredService<IOptions<VerificationOptions>>().Value.RequireMeaningfulDiff.Should().BeFalse();
     }
 
     [Fact]

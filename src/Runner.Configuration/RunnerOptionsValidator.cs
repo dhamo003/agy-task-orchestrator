@@ -16,11 +16,13 @@ public sealed class RunnerOptionsValidator : IValidateOptions<RunnerOptions>
         ValidateTopLevel(options, failures);
         ValidateRetry(options.Retry, failures);
         ValidateTimeout(options.Timeout, failures);
-        ValidateParallel(options.Parallel, failures);
         ValidateModel(options.ModelConfig, failures);
         ValidatePromptTemplate(options.PromptTemplate, failures);
         ValidateCompletion(options.Completion, failures);
         ValidateTerminal(options.Terminal, failures);
+        ValidateLimits(options.Limits, failures);
+        ValidateBuild(options.Build, failures);
+        ValidateCheckpoint(options.Checkpoint, failures);
 
         return failures.Count > 0
             ? ValidateOptionsResult.Fail(failures)
@@ -85,22 +87,71 @@ public sealed class RunnerOptionsValidator : IValidateOptions<RunnerOptions>
             failures.Add("Timeout.ModelSwitchTimeoutSeconds must be positive.");
         }
 
+        if (timeout.SessionTeardownSeconds <= 0)
+        {
+            failures.Add("Timeout.SessionTeardownSeconds must be positive.");
+        }
+
         if (timeout.SessionTimeoutMinutes < timeout.TaskTimeoutMinutes)
         {
             failures.Add("Timeout.SessionTimeoutMinutes must be >= TaskTimeoutMinutes.");
         }
     }
 
-    private static void ValidateParallel(ParallelExecutionOptions parallel, List<string> failures)
+    private static void ValidateLimits(LimitOptions limits, List<string> failures)
     {
-        if (parallel.MaxWorkers < 1)
+        if (limits.PauseSeconds <= 0)
         {
-            failures.Add("Parallel.MaxWorkers must be at least 1.");
+            failures.Add("Limits.PauseSeconds must be positive.");
         }
 
-        if (parallel.Mode == ExecutionMode.Parallel && parallel.MaxWorkers < 2)
+        if (limits.MaxPausesPerTask < 1)
         {
-            failures.Add("Parallel.MaxWorkers must be at least 2 when Mode is Parallel.");
+            failures.Add("Limits.MaxPausesPerTask must be at least 1.");
+        }
+    }
+
+    private static void ValidateBuild(BuildValidationOptions build, List<string> failures)
+    {
+        if (!build.Enabled)
+        {
+            return;
+        }
+
+        if (build.Commands.Count == 0)
+        {
+            failures.Add("Build.Commands must contain at least one command when Build.Enabled is true.");
+        }
+
+        foreach (var command in build.Commands)
+        {
+            if (string.IsNullOrWhiteSpace(command.Command))
+            {
+                failures.Add($"Build command '{command.Name}' must have a non-empty Command.");
+            }
+
+            if (command.TimeoutMinutes <= 0)
+            {
+                failures.Add($"Build command '{command.Name}' must have a positive TimeoutMinutes.");
+            }
+        }
+    }
+
+    private static void ValidateCheckpoint(CheckpointOptions checkpoint, List<string> failures)
+    {
+        if (!checkpoint.Enabled)
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(checkpoint.Directory))
+        {
+            failures.Add("Checkpoint.Directory must not be empty when checkpointing is enabled.");
+        }
+
+        if (string.IsNullOrWhiteSpace(checkpoint.CheckpointFileName))
+        {
+            failures.Add("Checkpoint.CheckpointFileName must not be empty when checkpointing is enabled.");
         }
     }
 
@@ -157,6 +208,23 @@ public sealed class RunnerOptionsValidator : IValidateOptions<RunnerOptions>
         if (string.IsNullOrWhiteSpace(terminal.ShellPath))
         {
             failures.Add("Terminal.ShellPath must not be empty.");
+        }
+
+        if (terminal.ExecutionMode == TerminalExecutionMode.OneShot)
+        {
+            if (string.IsNullOrWhiteSpace(terminal.AgentCommand))
+            {
+                failures.Add("Terminal.AgentCommand must not be empty when ExecutionMode is OneShot.");
+            }
+
+            if (terminal.OneShotArguments.Count == 0)
+            {
+                failures.Add("Terminal.OneShotArguments must contain at least one argument when ExecutionMode is OneShot.");
+            }
+            else if (!terminal.OneShotArguments.Any(a => a.Contains("{prompt}", StringComparison.Ordinal)))
+            {
+                failures.Add("Terminal.OneShotArguments must include the '{prompt}' placeholder when ExecutionMode is OneShot.");
+            }
         }
     }
 }

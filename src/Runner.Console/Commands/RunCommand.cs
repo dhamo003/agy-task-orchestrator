@@ -25,6 +25,18 @@ public sealed class RunCommand : AsyncCommand<RunSettings>
             services.PostConfigure<RunnerOptions>(options =>
             {
                 options.TasksFile = settings.TasksFile;
+                if (!string.IsNullOrWhiteSpace(settings.Workspace))
+                {
+                    options.WorkspacePath = settings.Workspace;
+                }
+
+                // CRITICAL: the workspace analyzer reads the NESTED Runner:Workspace options
+                // (options.Workspace.WorkspacePath). It must always agree with the top-level
+                // workspace, otherwise change verification watches the wrong directory
+                // (e.g. the runner's own publish folder when launched from there).
+                options.Workspace.WorkspacePath = !string.IsNullOrWhiteSpace(settings.Workspace)
+                    ? settings.Workspace
+                    : (options.WorkspacePath == "." ? Environment.CurrentDirectory : options.WorkspacePath);
 
                 if (settings.DryRun)
                 {
@@ -35,13 +47,28 @@ public sealed class RunCommand : AsyncCommand<RunSettings>
                 {
                     options.Verbose = true;
                 }
+
+                if (settings.OneShot)
+                {
+                    options.Terminal = options.Terminal with { ExecutionMode = TerminalExecutionMode.OneShot };
+                }
+
+                if (settings.RetryFailed)
+                {
+                    options.RetryFailedTasks = true;
+                }
+
+                if (settings.NoBuildValidation)
+                {
+                    options.Build.Enabled = false;
+                }
             });
 
             services.PostConfigure<WorkspaceOptions>(options =>
             {
-                options.WorkspacePath = Environment.CurrentDirectory;
-                // Currently TasksFile is part of MarkdownEngine options or WorkspaceOptions?
-                // Depending on Phase B implementation. We assume the path is resolved via ITaskParser initialization.
+                options.WorkspacePath = !string.IsNullOrWhiteSpace(settings.Workspace) 
+                    ? settings.Workspace 
+                    : Environment.CurrentDirectory;
             });
             
             if (!string.IsNullOrEmpty(settings.Model))
@@ -49,15 +76,6 @@ public sealed class RunCommand : AsyncCommand<RunSettings>
                 services.PostConfigure<ModelOptions>(options =>
                 {
                     options.TargetModel = settings.Model;
-                });
-            }
-            
-            if (settings.ParallelCount.HasValue)
-            {
-                services.PostConfigure<ParallelExecutionOptions>(options =>
-                {
-                    options.MaxWorkers = settings.ParallelCount.Value;
-                    options.Mode = ExecutionMode.Parallel;
                 });
             }
         });

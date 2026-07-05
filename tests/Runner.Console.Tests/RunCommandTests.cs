@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -12,6 +13,7 @@ using Runner.Markdown;
 using AntigravityTaskRunner.Terminal;
 using AntigravityTaskRunner.Terminal.Sessions;
 using AntigravityTaskRunner.Terminal.Detection;
+using AntigravityTaskRunner.Terminal.Workspace;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Moq;
@@ -25,6 +27,8 @@ namespace Runner.Console.Tests;
 [Collection("Sequential")]
 public class RunCommandTests : IDisposable
 {
+    private static readonly string[] SampleWorkspaceChanges = ["src/file.cs"];
+
     private readonly string _tempDir;
     private readonly string _tasksFile;
 
@@ -84,22 +88,31 @@ public class RunCommandTests : IDisposable
         mockCompletionDetector.Setup(x => x.DetectCompletion(It.IsAny<string>(), out success, out errorMessage))
                               .Returns(true);
 
-        var app = CreateApp(services => 
+        // Report a meaningful workspace change so the pipeline's strict verification treats each task as done.
+        var mockWorkspace = new Mock<IWorkspaceAnalyzer>();
+        mockWorkspace.Setup(w => w.TakeSnapshotAsync(It.IsAny<CancellationToken>()))
+                     .ReturnsAsync(new WorkspaceSnapshot(new Dictionary<string, FileSnapshot>(), DateTime.UtcNow));
+        mockWorkspace.Setup(w => w.GetChangeSet(It.IsAny<WorkspaceSnapshot>(), It.IsAny<WorkspaceSnapshot>()))
+                     .Returns(new WorkspaceChangeSet(
+                         [new FileChange(SampleWorkspaceChanges[0], FileChangeKind.Modified, IsMeaningful: true)]));
+
+        var app = CreateApp(services =>
         {
             // Override the real terminal session with mock
             services.AddSingleton(mockTerminal.Object);
             services.AddSingleton(mockCompletionDetector.Object);
+            services.AddSingleton(mockWorkspace.Object);
         });
 
-        // Act
-        var result = app.Run(new[] { "-t", _tasksFile });
+        // Act — use one-shot mode so completion is driven by the mocked process exit
+        // (WaitForExitAsync -> exit 0) rather than interactive terminal-output heuristics.
+        var result = app.Run(new[] { "--one-shot", "-t", _tasksFile });
 
         // Assert
         Assert.Equal(0, result);
-        // We expect tasks to be completed, but wait, without setting up the full prompt/response in terminal mock,
-        // will the orchestrator mark it complete? The CompletionDetector looks at output.
-        // We might need to mock ICompletionDetector as well, or ensure output has success markers.
-        // For a basic E2E, ensuring it returns 0 is a good start.
+        var content = File.ReadAllText(_tasksFile);
+        Assert.Contains("- [x] Task 1", content);
+        Assert.Contains("- [x] Task 2", content);
     }
 
     private CommandApp<RunCommand> CreateApp(Action<IServiceCollection>? configureOverrides = null)
@@ -118,6 +131,12 @@ public class RunCommandTests : IDisposable
                 services.AddHostedService<OrchestratorHostedService>();
 
                 services.PostConfigure<WorkspaceOptions>(opts => opts.WorkspacePath = _tempDir);
+                services.PostConfigure<RunnerOptions>(opts =>
+                {
+                    opts.WorkspacePath = _tempDir;
+                    // No real dotnet builds inside unit tests.
+                    opts.Build.Enabled = false;
+                });
 
                 configureOverrides?.Invoke(services);
             });

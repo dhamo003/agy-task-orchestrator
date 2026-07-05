@@ -46,17 +46,21 @@ public sealed class WorkspaceOptions
 
     /// <summary>
     /// Strategy for detecting workspace changes after task execution.
+    /// Content hashing is the default: deterministic and immune to timestamp noise.
     /// </summary>
-    public WorkspaceDetectStrategy DetectStrategy { get; set; } = WorkspaceDetectStrategy.Timestamp;
+    public WorkspaceDetectStrategy DetectStrategy { get; set; } = WorkspaceDetectStrategy.Hash;
 
     /// <summary>
     /// File patterns to include when scanning workspace changes (glob patterns).
-    /// Empty means include all files.
+    /// Everything is snapshotted by default; the verification engine decides which
+    /// changes are meaningful.
     /// </summary>
-    public List<string> IncludePatterns { get; set; } = ["**/*.cs", "**/*.csproj", "**/*.md"];
+    public List<string> IncludePatterns { get; set; } = ["**/*"];
 
     /// <summary>
     /// File patterns to exclude when scanning workspace changes (glob patterns).
     /// </summary>
-    public List<string> ExcludePatterns { get; set; } = ["**/bin/**", "**/obj/**", "**/.git/**"];
+    public List<string> ExcludePatterns { get; set; } =
+        ["**/bin/**", "**/obj/**", "**/.git/**", "**/.vs/**", "**/node_modules/**",
+         "**/logs/**", "**/.antigravity/**"];
 }

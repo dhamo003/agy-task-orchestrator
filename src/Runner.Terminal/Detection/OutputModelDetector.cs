@@ -18,7 +18,35 @@ public partial class OutputModelDetector : IModelDetector
 
     public Task<string?> DetectModelAsync(ITerminalSession session, CancellationToken token = default)
     {
-        _logger.LogDebug("Model detection is bypassed (interactive menu is required). Falling back to force switch.");
+        var output = session.GetCurrentOutput().StdOut;
+        if (string.IsNullOrWhiteSpace(output))
+        {
+            return Task.FromResult<string?>(null);
+        }
+
+        var knownModels = new[]
+        {
+            "gemini 3.5 flash (high)",
+            "gemini 3.5 flash (medium)",
+            "gemini 3.5 flash (low)",
+            "gemini 3.1 pro (high)",
+            "gemini 3.1 pro (low)",
+            "claude sonnet 4.6 (thinking)",
+            "claude opus 4.6 (thinking)",
+            "gpt-oss 120b (medium)"
+        };
+
+        foreach (var m in knownModels)
+        {
+            var normalizedHyphen = m.Replace(" ", "-").Replace("(", "").Replace(")", "");
+            if (output.Contains(m, StringComparison.OrdinalIgnoreCase) ||
+                output.Contains(normalizedHyphen, StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogDebug("Detected active CLI model from output: {Model}", m);
+                return Task.FromResult<string?>(m);
+            }
+        }
+
         return Task.FromResult<string?>(null);
     }
 

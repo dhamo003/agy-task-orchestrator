@@ -29,12 +29,7 @@ public class CliModelSwitcher : IModelSwitcher
         await session.SendInputAsync("/model", token);
         await Task.Delay(1000, token);
 
-        // 2. Type the target model name to filter the interactive list
-        await session.SendInputAsync(targetModel, token);
-        await Task.Delay(500, token);
-
-        // 3. The list is filtered, the first match should be selected. Send Enter to confirm.
-        // SendInputAsync appends Environment.NewLine which simulates Enter.
+        // 2. Send Enter to confirm highlighted model / close menu
         await session.SendInputAsync("", token);
         await Task.Delay(500, token);
 

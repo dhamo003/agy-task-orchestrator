@@ -187,55 +187,78 @@ public class RunnerOptionsValidatorTests
 
     #endregion
 
-    #region Parallel Validation
+    #region Limits / Build / Checkpoint Validation
 
     [Fact]
-    public void Validate_WithZeroMaxWorkers_ShouldFail()
+    public void Validate_WithNonPositivePauseSeconds_ShouldFail()
     {
-        var options = new RunnerOptions
-        {
-            Parallel = new ParallelExecutionOptions { MaxWorkers = 0 }
-        };
+        var options = new RunnerOptions();
+        options.Limits.PauseSeconds = 0;
 
         var result = _validator.Validate(null, options);
 
         result.Succeeded.Should().BeFalse();
-        result.FailureMessage.Should().Contain("MaxWorkers");
+        result.FailureMessage.Should().Contain("PauseSeconds");
     }
 
     [Fact]
-    public void Validate_WithParallelModeAndSingleWorker_ShouldFail()
+    public void Validate_WithZeroMaxPauses_ShouldFail()
     {
-        var options = new RunnerOptions
-        {
-            Parallel = new ParallelExecutionOptions
-            {
-                Mode = ExecutionMode.Parallel,
-                MaxWorkers = 1
-            }
-        };
+        var options = new RunnerOptions();
+        options.Limits.MaxPausesPerTask = 0;
 
         var result = _validator.Validate(null, options);
 
         result.Succeeded.Should().BeFalse();
-        result.FailureMessage.Should().Contain("MaxWorkers");
+        result.FailureMessage.Should().Contain("MaxPausesPerTask");
     }
 
     [Fact]
-    public void Validate_WithSequentialModeAndSingleWorker_ShouldSucceed()
+    public void Validate_WithBuildEnabledButNoCommands_ShouldFail()
     {
-        var options = new RunnerOptions
-        {
-            Parallel = new ParallelExecutionOptions
-            {
-                Mode = ExecutionMode.Sequential,
-                MaxWorkers = 1
-            }
-        };
+        var options = new RunnerOptions();
+        options.Build.Commands.Clear();
+
+        var result = _validator.Validate(null, options);
+
+        result.Succeeded.Should().BeFalse();
+        result.FailureMessage.Should().Contain("Build.Commands");
+    }
+
+    [Fact]
+    public void Validate_WithBuildDisabled_IgnoresBuildCommands()
+    {
+        var options = new RunnerOptions();
+        options.Build.Enabled = false;
+        options.Build.Commands.Clear();
 
         var result = _validator.Validate(null, options);
 
         result.Succeeded.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Validate_WithEmptyBuildCommand_ShouldFail()
+    {
+        var options = new RunnerOptions();
+        options.Build.Commands.Add(new BuildCommandOptions { Name = "custom", Command = "" });
+
+        var result = _validator.Validate(null, options);
+
+        result.Succeeded.Should().BeFalse();
+        result.FailureMessage.Should().Contain("custom");
+    }
+
+    [Fact]
+    public void Validate_WithCheckpointEnabledButNoDirectory_ShouldFail()
+    {
+        var options = new RunnerOptions();
+        options.Checkpoint.Directory = "";
+
+        var result = _validator.Validate(null, options);
+
+        result.Succeeded.Should().BeFalse();
+        result.FailureMessage.Should().Contain("Checkpoint.Directory");
     }
 
     #endregion

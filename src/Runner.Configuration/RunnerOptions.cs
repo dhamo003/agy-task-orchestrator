@@ -47,11 +47,6 @@ public sealed class RunnerOptions
     public TimeoutOptions Timeout { get; set; } = new();
 
     /// <summary>
-    /// Parallel execution configuration.
-    /// </summary>
-    public ParallelExecutionOptions Parallel { get; set; } = new();
-
-    /// <summary>
     /// Model selection and switching configuration.
     /// </summary>
     public ModelOptions ModelConfig { get; set; } = new();
@@ -70,8 +65,36 @@ public sealed class RunnerOptions
     /// Completion detection configuration.
     /// </summary>
     public CompletionOptions Completion { get; set; } = new();
+
     /// <summary>
     /// Terminal session configuration.
     /// </summary>
     public TerminalOptions Terminal { get; set; } = new();
+
+    /// <summary>
+    /// Completion-verification engine configuration.
+    /// </summary>
+    public VerificationOptions Verification { get; set; } = new();
+
+    /// <summary>
+    /// Post-attempt build &amp; test validation configuration.
+    /// </summary>
+    public BuildValidationOptions Build { get; set; } = new();
+
+    /// <summary>
+    /// Token/rate/quota limit detection and pause/resume configuration.
+    /// </summary>
+    public LimitOptions Limits { get; set; } = new();
+
+    /// <summary>
+    /// Persistent checkpointing / crash-recovery configuration.
+    /// </summary>
+    public CheckpointOptions Checkpoint { get; set; } = new();
+
+    /// <summary>
+    /// When true, a task previously marked failed ([!]) is reset to pending and
+    /// re-attempted on startup. When false (default) the orchestrator halts on a
+    /// failed task so nothing is ever silently skipped.
+    /// </summary>
+    public bool RetryFailedTasks { get; set; }
 }

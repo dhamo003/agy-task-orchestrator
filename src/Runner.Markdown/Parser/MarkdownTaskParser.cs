@@ -42,7 +42,7 @@ public class MarkdownTaskParser : ITaskParser
                 var statusChar = match.Groups["status"].Value.FirstOrDefault();
                 var status = ParseStatus(statusChar);
                 var rawText = line;
-                var displayText = match.Groups["text"].Value;
+                var displayText = Regex.Replace(match.Groups["text"].Value, @"\s*\(Reason:.*\)$", "", RegexOptions.IgnoreCase);
 
                 if (indent == 0 && displayText.Contains("**Phase", StringComparison.OrdinalIgnoreCase))
                 {
@@ -102,7 +102,14 @@ public class MarkdownTaskParser : ITaskParser
         {
             foreach (var task in phase.Tasks)
             {
-                if (task.Status == TaskStatus.NotStarted || task.Status == TaskStatus.InProgress || task.Status == TaskStatus.Failed)
+                // The next task is the first one that is not finished:
+                // - NotStarted ([ ]) and InProgress ([/]) are executed (InProgress lets an
+                //   interrupted run resume the task it was on).
+                // - Failed ([!]) is returned so the ORCHESTRATOR can decide: halt the
+                //   pipeline (default — unfinished work is never skipped) or re-attempt it
+                //   when RetryFailedTasks is enabled. The parser never skips past it.
+                // - Only Completed ([x]) and Skipped ([-]) are passed over.
+                if (task.Status is TaskStatus.NotStarted or TaskStatus.InProgress or TaskStatus.Failed)
                 {
                     return task;
                 }

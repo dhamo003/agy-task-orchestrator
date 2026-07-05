@@ -9,14 +9,16 @@ public sealed class PromptTemplateOptions
 {
     /// <summary>
     /// Default prompt template with standard placeholders.
+    /// The completion markers are QUOTED on purpose: interactive CLIs echo the prompt
+    /// back into the terminal, and the quotes guarantee that any echoed (or line-wrapped)
+    /// fragment of these instructions can never look like a genuine standalone marker
+    /// line to the completion detector.
     /// </summary>
     private const string DefaultTemplate =
-        "/goal Read {tasksFile}. Find the single checklist line that exactly matches:\n" +
-        "'{taskLine}'\n\n" +
-        "Complete ONLY that task, verifying your work before finishing.\n" +
-        "Do not start or touch any other task in the file, even if it seems related.\n" +
-        "When you finish, print the word 'TASK_' followed by 'COMPLETED'.\n" +
-        "When you cannot complete it, print the word 'TASK_' followed by 'FAILED'.";
+        "Read {tasksFile}. Find the single checklist line that matches: '{taskLine}'. " +
+        "Complete ONLY that task by writing or modifying code and tests. Verify your work. " +
+        "When fully finished and verified, print a final line containing exactly \"TASK_COMPLETED\" (without the quotes, no other text on that line). " +
+        "If you cannot complete the task, print a final line \"TASK_FAILED: <reason>\" (without the quotes).";
 
     /// <summary>
     /// The prompt template string with placeholders.

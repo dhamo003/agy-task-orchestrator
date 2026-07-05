@@ -4,6 +4,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Options;
 using AntigravityTaskRunner.Configuration;
+using AntigravityTaskRunner.Core.Retry;
 using Runner.Markdown.Models;
 using AntigravityTaskRunner.Terminal.Workspace;
 
@@ -18,7 +19,11 @@ public class PromptTemplateEngine : IPromptTemplateEngine
         _options = options.Value;
     }
 
-    public Task<string> BuildPromptAsync(TaskItem task, WorkspaceSnapshot initialSnapshot, CancellationToken cancellationToken = default)
+    public Task<string> BuildPromptAsync(
+        TaskItem task,
+        WorkspaceSnapshot initialSnapshot,
+        RetryContext? retryContext = null,
+        CancellationToken cancellationToken = default)
     {
         var templateOptions = _options.PromptTemplate;
         var sb = new StringBuilder();
@@ -29,14 +34,15 @@ public class PromptTemplateEngine : IPromptTemplateEngine
             sb.AppendLine(templateOptions.Prefix);
         }
 
-        // 2. Main Template Replacement
+        // 2. Main template replacement
         var prompt = templateOptions.Template
             .Replace("{task}", task.DisplayText)
             .Replace("{taskLine}", task.RawText.Trim())
+            .Replace("{lineNumber}", task.LineNumber.ToString(System.Globalization.CultureInfo.InvariantCulture))
             .Replace("{tasksFile}", _options.TasksFile)
             .Replace("{workspace}", _options.WorkspacePath);
 
-        // 3. Workspace Context Injection (Task H.02)
+        // 3. Workspace context injection
         if (prompt.Contains("{workspaceContext}"))
         {
             var contextBuilder = new StringBuilder();
@@ -48,7 +54,7 @@ public class PromptTemplateEngine : IPromptTemplateEngine
             prompt = prompt.Replace("{workspaceContext}", contextBuilder.ToString());
         }
 
-        // 4. Custom Variables Replacement
+        // 4. Custom variables replacement
         if (templateOptions.Variables != null)
         {
             foreach (var kvp in templateOptions.Variables)
@@ -59,7 +65,20 @@ public class PromptTemplateEngine : IPromptTemplateEngine
 
         sb.AppendLine(prompt);
 
-        // 5. Suffix (Task-only scope enforcement can be placed here)
+        // 5. Retry failure context: tell the AI exactly what went wrong last time.
+        if (retryContext is { IsRetry: true })
+        {
+            var guidance = retryContext.BuildGuidance();
+            if (guidance.Length > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine("---- PREVIOUS ATTEMPT FAILURE CONTEXT ----");
+                sb.AppendLine(guidance);
+                sb.AppendLine("---- END FAILURE CONTEXT ----");
+            }
+        }
+
+        // 6. Suffix (task-only scope enforcement can be placed here)
         if (!string.IsNullOrWhiteSpace(templateOptions.Suffix))
         {
             sb.AppendLine();

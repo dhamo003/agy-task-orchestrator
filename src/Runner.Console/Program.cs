@@ -34,7 +34,9 @@ var app = new CommandApp<RunCommand>(registrar);
 app.Configure(config =>
 {
     config.SetApplicationName("antigravity");
-    config.AddExample(["--model", "gpt-4", "--parallel", "4"]);
+    config.AddExample(["--workspace", "C:\\my\\project", "--tasks", "tasks.md"]);
+    config.AddExample(["--one-shot", "--model", "gemini-3.5-pro"]);
+    config.AddExample(["--retry-failed"]);
 });
 
 return app.Run(args);

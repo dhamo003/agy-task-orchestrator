@@ -13,10 +13,12 @@ public interface IWorkspaceAnalyzer
     Task<WorkspaceSnapshot> TakeSnapshotAsync(CancellationToken token = default);
 
     /// <summary>
-    /// Compares two snapshots and returns a list of changed files (added, modified, deleted).
+    /// Compares two snapshots and returns the categorized change set: created,
+    /// modified, deleted, and renamed files, each classified as meaningful (real
+    /// implementation change) or not (documentation, cache, formatting-only).
+    /// The tasks file, logs, and runner state are excluded.
     /// </summary>
     /// <param name="before">The snapshot taken before the task execution.</param>
     /// <param name="after">The snapshot taken after the task execution.</param>
-    /// <returns>A list of relative file paths that have changed.</returns>
-    IReadOnlyList<string> GetChanges(WorkspaceSnapshot before, WorkspaceSnapshot after);
+    WorkspaceChangeSet GetChangeSet(WorkspaceSnapshot before, WorkspaceSnapshot after);
 }

@@ -2,218 +2,180 @@ using System;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.Extensions.Options;
-using Microsoft.Extensions.DependencyInjection;
-using Runner.Markdown.Models;
-using Runner.Markdown.Writer;
-using Runner.Logging;
-using AntigravityTaskRunner.Configuration;
 using AntigravityTaskRunner.Core.Models;
+using AntigravityTaskRunner.Core.Progress;
+using AntigravityTaskRunner.Core.Verification;
+using AntigravityTaskRunner.Terminal.Build;
+using AntigravityTaskRunner.Terminal.Detection;
 using AntigravityTaskRunner.Terminal.Sessions;
 using AntigravityTaskRunner.Terminal.Workspace;
-using AntigravityTaskRunner.Terminal.Detection;
-using AntigravityTaskRunner.Core.Prompts;
-using TaskStatus = Runner.Markdown.Models.TaskStatus;
+using Runner.Logging;
+using Runner.Markdown.Models;
 
 namespace AntigravityTaskRunner.Core.Pipeline;
 
 /// <summary>
-/// Orchestrates the lifecycle of a single task.
+/// Orchestrates one attempt of a single task. Stages:
+/// 1. Run a fresh, isolated agent session (torn down before this method returns).
+/// 2. Scan the output for capacity limits (token/rate/quota/context) — these pause, not fail.
+/// 3. Verify the workspace: categorized change set + meaningful-implementation-diff check.
+/// 4. Run build &amp; test validation (dotnet restore/build/test) — only when 3 passed.
+/// A task attempt succeeds only when every stage passes.
 /// </summary>
 public class TaskPipeline : ITaskPipeline
 {
-    private readonly IServiceProvider _serviceProvider;
+    private readonly IAgentSessionRunner _sessionRunner;
     private readonly IWorkspaceAnalyzer _workspaceAnalyzer;
-    private readonly IModelDetector _modelDetector;
-    private readonly IModelSwitcher _modelSwitcher;
-    private readonly ICompletionDetector _completionDetector;
-    private readonly ITaskWriter _taskWriter;
+    private readonly ICompletionVerifier _verifier;
+    private readonly IBuildValidator _buildValidator;
+    private readonly ILimitDetector _limitDetector;
+    private readonly IProgressTracker _progress;
     private readonly ITaskLogger _logger;
-    private readonly IPromptTemplateEngine _promptTemplateEngine;
-    private readonly RunnerOptions _options;
 
     public TaskPipeline(
-        IServiceProvider serviceProvider,
+        IAgentSessionRunner sessionRunner,
         IWorkspaceAnalyzer workspaceAnalyzer,
-        IModelDetector modelDetector,
-        IModelSwitcher modelSwitcher,
-        ICompletionDetector completionDetector,
-        ITaskWriter taskWriter,
-        ITaskLogger logger,
-        IPromptTemplateEngine promptTemplateEngine,
-        IOptions<RunnerOptions> options)
+        ICompletionVerifier verifier,
+        IBuildValidator buildValidator,
+        ILimitDetector limitDetector,
+        IProgressTracker progress,
+        ITaskLogger logger)
     {
-        _serviceProvider = serviceProvider;
+        _sessionRunner = sessionRunner;
         _workspaceAnalyzer = workspaceAnalyzer;
-        _modelDetector = modelDetector;
-        _modelSwitcher = modelSwitcher;
-        _completionDetector = completionDetector;
-        _taskWriter = taskWriter;
+        _verifier = verifier;
+        _buildValidator = buildValidator;
+        _limitDetector = limitDetector;
+        _progress = progress;
         _logger = logger;
-        _promptTemplateEngine = promptTemplateEngine;
-        _options = options.Value;
     }
 
-    public async Task<TaskExecutionResult> ExecuteAsync(TaskItem task, CancellationToken token = default)
+    public async Task<TaskExecutionResult> ExecuteAsync(
+        TaskItem task,
+        WorkspaceSnapshot initialSnapshot,
+        string prompt,
+        int attempt,
+        CancellationToken token = default)
     {
         var stopwatch = Stopwatch.StartNew();
-        var logScope = new TaskLogScope($"T-{task.LineNumber}", task.DisplayText, 1);
-        
-        _logger.LogInfo(logScope, "Starting task pipeline...");
+        var scope = new TaskLogScope($"T-{task.LineNumber}", task.DisplayText, attempt);
+        _logger.LogInfo(scope, "Starting task pipeline attempt...");
 
         try
         {
-            // Step 1: Take workspace snapshot
-            _logger.LogDebug(logScope, "Taking initial workspace snapshot...");
-            var initialSnapshot = await _workspaceAnalyzer.TakeSnapshotAsync(token);
-
-            // Step 2: Spawn terminal session
-            // We resolve a new session per task to ensure clean state
-            using var terminalSession = _serviceProvider.GetRequiredService<ITerminalSession>();
-            _logger.LogDebug(logScope, "Starting terminal session...");
-            await terminalSession.StartAsync(token);
-
-            // Navigate to workspace and start agy
-            var workspacePath = _options.WorkspacePath;
-            if (string.IsNullOrWhiteSpace(workspacePath) || workspacePath == ".")
-            {
-                workspacePath = Environment.CurrentDirectory;
-            }
-            _logger.LogDebug(logScope, $"Navigating to {workspacePath} and starting Antigravity...");
-            await terminalSession.SendInputAsync($"cd /d \"{workspacePath}\"", token);
-            await terminalSession.SendInputAsync("agy", token);
-
-            // Step 3: Wait for CLI ready
-            _logger.LogDebug(logScope, "Waiting for Antigravity banner...");
-            bool isReady = false;
-            var readyTokenSource = CancellationTokenSource.CreateLinkedTokenSource(token);
-            readyTokenSource.CancelAfter(TimeSpan.FromSeconds(30));
-
-            try
-            {
-                while (!isReady && !readyTokenSource.IsCancellationRequested)
-                {
-                    await Task.Delay(1000, readyTokenSource.Token);
-                    var output = terminalSession.GetCurrentOutput().StdOut + terminalSession.GetCurrentOutput().StdErr;
-                    
-                    if (output.Contains("Do you trust the contents of this project?"))
-                    {
-                        _logger.LogInfo(logScope, "Detected trust prompt. Approving automatically.");
-                        await terminalSession.SendInputAsync("", token); // Send Enter to accept default "Yes"
-                        await Task.Delay(1000, token);
-                    }
-
-                    if (output.Contains("? for shortcuts"))
-                    {
-                        isReady = true;
-                    }
-                }
-            }
-            catch (OperationCanceledException) when (!token.IsCancellationRequested)
-            {
-                _logger.LogWarning(logScope, "Timed out waiting for Antigravity banner.");
-            }
-
-            // Step 4: Verify/switch model
-            _logger.LogDebug(logScope, "Verifying/switching model...");
-            var currentModel = await _modelDetector.DetectModelAsync(terminalSession, token);
-            if (currentModel != _options.Model)
-            {
-                await _modelSwitcher.SwitchModelAsync(terminalSession, _options.Model, token);
-                await Task.Delay(2000, token); // Wait for switch to take effect
-            }
-
-            // Step 5: Build prompt from template
-            _logger.LogDebug(logScope, "Building prompt...");
-            string prompt = await _promptTemplateEngine.BuildPromptAsync(task, initialSnapshot, token);
-
-            // Step 6: Send prompt via stdin
-            _logger.LogDebug(logScope, "Sending prompt...");
-            terminalSession.ClearOutputBuffers();
-            await terminalSession.SendInputAsync(prompt, token);
-
-            // Step 7: Monitor output for completion
-            _logger.LogDebug(logScope, "Monitoring output for completion...");
-            bool isCompleted = false;
-            bool success = false;
-            string? errorMessage = null;
-            int lastProcessedOffset = 0;
-
-            // Poll output every second up to task timeout
-            var timeoutTokenSource = CancellationTokenSource.CreateLinkedTokenSource(token);
-            timeoutTokenSource.CancelAfter(_options.Timeout.TaskTimeout);
-
-            try
-            {
-                while (!isCompleted && !timeoutTokenSource.IsCancellationRequested)
-                {
-                    await Task.Delay(1000, timeoutTokenSource.Token);
-                    var output = terminalSession.GetCurrentOutput().StdOut;
-                    
-                    if (output.Length > lastProcessedOffset)
-                    {
-                        var newOutput = output.Substring(lastProcessedOffset);
-                        _logger.LogDebug(logScope, $"[TERMINAL OUTPUT] {newOutput.Replace("\r", "\\r").Replace("\n", "\\n")}");
-                        bool hasMarkers = _completionDetector.DetectCompletion(newOutput, out success, out errorMessage);
-                        bool isAgentFinished = newOutput.Contains("? for shortcuts");
-
-                        lastProcessedOffset = output.Length;
-
-                        if (hasMarkers)
-                        {
-                            isCompleted = true;
-                        }
-                        else if (isAgentFinished)
-                        {
-                            // The agent returned to the prompt without triggering explicit markers.
-                            // We will consider it completed. We can assume success by default,
-                            // and let the workspace changes verification decide if it actually did the work.
-                            isCompleted = true;
-                            success = true;
-                        }
-                    }
-                }
-            }
-            catch (OperationCanceledException) when (!token.IsCancellationRequested)
-            {
-                // Timeout occurred
-                isCompleted = true;
-                success = false;
-                errorMessage = "Task timed out.";
-            }
-
-            // Step 8: Verify workspace changes
-            _logger.LogDebug(logScope, "Verifying workspace changes...");
-            var finalSnapshot = await _workspaceAnalyzer.TakeSnapshotAsync(token);
-            var changes = _workspaceAnalyzer.GetChanges(initialSnapshot, finalSnapshot);
-            _logger.LogInfo(logScope, $"Detected {changes.Count} file changes.");
-
-            // Step 9: Mark checkbox and close terminal
-            // terminalSession is disposed at the end of the using block, which closes it.
-            _logger.LogDebug(logScope, $"Updating task status to {(success ? "Completed" : "Failed")}...");
-            await _taskWriter.UpdateStatusAsync(
-                _options.TasksFile, 
-                task, 
-                success ? TaskStatus.Completed : TaskStatus.Failed, 
-                errorMessage, 
+            // Stage 1: fresh agent session (runner guarantees deterministic teardown).
+            var runResult = await _sessionRunner.RunAsync(
+                scope, prompt,
+                status => _progress.ReportStatus(task, status),
                 token);
 
+            // Stage 2: capacity-limit detection. Checked FIRST so a rate-limited attempt
+            // pauses instead of being misclassified as a normal failure.
+            var limit = _limitDetector.Detect(runResult.Output);
+            if (limit is not null)
+            {
+                stopwatch.Stop();
+                _logger.LogWarning(scope, $"Capacity limit detected: {limit.MatchedText}");
+                return new TaskExecutionResult(task, false, stopwatch.Elapsed,
+                    $"Capacity limit detected ({limit.MatchedPattern}): {limit.MatchedText}",
+                    attempt, FailureKind.CapacityLimit, Limit: limit);
+            }
+
+            // Session-level failures.
+            if (runResult.FailureDetail is not null)
+            {
+                stopwatch.Stop();
+                return new TaskExecutionResult(task, false, stopwatch.Elapsed,
+                    runResult.FailureDetail, attempt, FailureKind.SessionFailure);
+            }
+
+            if (runResult.TimedOut)
+            {
+                stopwatch.Stop();
+                return new TaskExecutionResult(task, false, stopwatch.Elapsed,
+                    "Task timed out before the agent finished.", attempt, FailureKind.Timeout);
+            }
+
+            // Stage 3: workspace verification.
+            _progress.ReportStatus(task, "Verifying workspace changes");
+            _logger.LogInfo(scope, "[workflow] Verification started");
+            var finalSnapshot = await _workspaceAnalyzer.TakeSnapshotAsync(token);
+            var changeSet = _workspaceAnalyzer.GetChangeSet(initialSnapshot, finalSnapshot);
+            var verification = _verifier.Verify(runResult, changeSet);
+            _logger.LogInfo(scope, verification.Describe());
+
+            if (!verification.Passed)
+            {
+                stopwatch.Stop();
+                var kind = ClassifyVerificationFailure(runResult, changeSet);
+                var reason = string.Join("; ", System.Linq.Enumerable.Select(
+                    verification.FailedChecks, c => c.Detail));
+                return new TaskExecutionResult(task, false, stopwatch.Elapsed, reason, attempt,
+                    kind, Verification: verification);
+            }
+
+            // Stage 4: build & test validation.
+            _progress.ReportStatus(task, "Running build & test validation");
+            _logger.LogInfo(scope, "[workflow] Build validation started");
+            var build = await _buildValidator.ValidateAsync(token);
+            foreach (var stage in build.Stages)
+            {
+                _logger.LogInfo(scope,
+                    $"[build] {stage.Name}: {(stage.Skipped ? $"skipped ({stage.SkipReason})" : stage.Success ? "passed" : $"FAILED (exit {stage.ExitCode})")} in {stage.Duration.TotalSeconds:F1}s");
+            }
+
+            if (!build.Success)
+            {
+                stopwatch.Stop();
+                var failedStage = build.FirstFailure;
+                var kind = failedStage is not null &&
+                           failedStage.Name.Contains("test", StringComparison.OrdinalIgnoreCase)
+                    ? FailureKind.TestsFailed
+                    : FailureKind.BuildFailed;
+                return new TaskExecutionResult(task, false, stopwatch.Elapsed,
+                    build.Summary, attempt, kind, Verification: verification, Build: build);
+            }
+
             stopwatch.Stop();
-            return new TaskExecutionResult(task, success, stopwatch.Elapsed, errorMessage, 0);
+            _logger.LogInfo(scope, "All verification and build checks passed.");
+            return new TaskExecutionResult(task, true, stopwatch.Elapsed, null, attempt,
+                FailureKind.None, Verification: verification, Build: build);
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {
             stopwatch.Stop();
-            _logger.LogError(logScope, "Pipeline execution failed with exception", ex);
-            
-            await _taskWriter.UpdateStatusAsync(
-                _options.TasksFile, 
-                task, 
-                TaskStatus.Failed, 
-                "Pipeline execution error: " + ex.Message, 
-                token);
-
-            return new TaskExecutionResult(task, false, stopwatch.Elapsed, ex.Message, 0);
+            _logger.LogError(scope, "Pipeline execution failed with exception", ex);
+            return new TaskExecutionResult(task, false, stopwatch.Elapsed, ex.Message, attempt,
+                FailureKind.Exception);
         }
+    }
+
+    private static FailureKind ClassifyVerificationFailure(AgentRunResult runResult, WorkspaceChangeSet changeSet)
+    {
+        if (runResult.MarkerDetected && !runResult.MarkerSuccess)
+        {
+            return FailureKind.AgentReportedFailure;
+        }
+
+        if (runResult.ExitCode is int exit && exit != 0)
+        {
+            return FailureKind.SessionFailure;
+        }
+
+        if (!(runResult.MarkerDetected && runResult.MarkerSuccess))
+        {
+            return FailureKind.MarkerMissing;
+        }
+
+        if (!changeSet.HasAnyChanges)
+        {
+            return FailureKind.NoChanges;
+        }
+
+        return FailureKind.NoMeaningfulChanges;
     }
 }

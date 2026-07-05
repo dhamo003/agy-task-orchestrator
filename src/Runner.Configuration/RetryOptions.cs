@@ -24,6 +24,7 @@ public sealed class RetryOptions
 
     /// <summary>
     /// When true, adds random jitter to backoff delays to prevent thundering herd.
+    /// Defaults to false so unattended runs are deterministic.
     /// </summary>
-    public bool UseJitter { get; set; } = true;
+    public bool UseJitter { get; set; }
 }

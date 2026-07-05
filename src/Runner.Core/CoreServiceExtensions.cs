@@ -1,14 +1,12 @@
 using AntigravityTaskRunner.Core.Cancellation;
+using AntigravityTaskRunner.Core.Checkpointing;
 using AntigravityTaskRunner.Core.Orchestration;
 using AntigravityTaskRunner.Core.Pipeline;
 using AntigravityTaskRunner.Core.Progress;
+using AntigravityTaskRunner.Core.Prompts;
 using AntigravityTaskRunner.Core.Retry;
+using AntigravityTaskRunner.Core.Verification;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Options;
-using AntigravityTaskRunner.Configuration;
-using Runner.Markdown.Parser;
-using Runner.Logging;
-using System;
 
 namespace AntigravityTaskRunner.Core;
 
@@ -18,31 +16,14 @@ public static class CoreServiceExtensions
     {
         services.AddSingleton<ICancellationManager, CancellationManager>();
         services.AddSingleton<IProgressTracker, ProgressTracker>();
+        services.AddSingleton<ICheckpointStore, JsonCheckpointStore>();
+        services.AddSingleton<ICompletionVerifier, CompletionVerifier>();
         services.AddTransient<IRetryPolicy, RetryPolicy>();
-        services.AddTransient<AntigravityTaskRunner.Core.Prompts.IPromptTemplateEngine, AntigravityTaskRunner.Core.Prompts.PromptTemplateEngine>();
+        services.AddTransient<IPromptTemplateEngine, PromptTemplateEngine>();
         services.AddTransient<ITaskPipeline, TaskPipeline>();
 
-        // Register Orchestrator using a factory based on ExecutionMode
-        services.AddTransient<ITaskOrchestrator>(sp =>
-        {
-            var options = sp.GetRequiredService<IOptions<RunnerOptions>>().Value;
-            var parser = sp.GetRequiredService<ITaskParser>();
-            var pipeline = sp.GetRequiredService<ITaskPipeline>();
-            var retryPolicy = sp.GetRequiredService<IRetryPolicy>();
-            var progressTracker = sp.GetRequiredService<IProgressTracker>();
-            var logger = sp.GetRequiredService<ITaskLogger>();
-            var optionsSnap = sp.GetRequiredService<IOptions<RunnerOptions>>();
-            var writer = sp.GetRequiredService<Runner.Markdown.Writer.ITaskWriter>();
-
-            if (options.Parallel.Mode == ExecutionMode.Parallel)
-            {
-                return new ParallelOrchestrator(parser, writer, pipeline, retryPolicy, progressTracker, logger, optionsSnap);
-            }
-            else
-            {
-                return new SequentialOrchestrator(parser, writer, pipeline, retryPolicy, progressTracker, logger, optionsSnap);
-            }
-        });
+        // Execution is strictly sequential by design: exactly one task, one session.
+        services.AddTransient<ITaskOrchestrator, SequentialOrchestrator>();
 
         return services;
     }

@@ -1,5 +1,6 @@
 using System;
 using System.Threading;
+using AntigravityTaskRunner.Core.Models;
 using Runner.Markdown.Models;
 
 namespace AntigravityTaskRunner.Core.Progress;
@@ -19,6 +20,8 @@ public class ProgressTracker : IProgressTracker
 
     public event EventHandler<TaskItem>? TaskStarted;
     public event EventHandler<(TaskItem Task, bool Success, TimeSpan Duration)>? TaskCompleted;
+    public event EventHandler<(TaskItem Task, string Status)>? StatusChanged;
+    public event EventHandler<PipelineHaltReport>? PipelineHalted;
 
     public void ReportTaskStarted(TaskItem task)
     {
@@ -36,7 +39,17 @@ public class ProgressTracker : IProgressTracker
         {
             Interlocked.Increment(ref _tasksFailed);
         }
-        
+
         TaskCompleted?.Invoke(this, (task, success, duration));
+    }
+
+    public void ReportStatus(TaskItem task, string status)
+    {
+        StatusChanged?.Invoke(this, (task, status));
+    }
+
+    public void ReportPipelineHalted(PipelineHaltReport report)
+    {
+        PipelineHalted?.Invoke(this, report);
     }
 }

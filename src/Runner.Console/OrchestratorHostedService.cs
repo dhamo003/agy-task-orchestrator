@@ -43,6 +43,15 @@ public class OrchestratorHostedService : IHostedService
     {
         try
         {
+            // Build stamp: makes it immediately obvious when a stale publish is running.
+            var entryAssembly = System.Reflection.Assembly.GetEntryAssembly()?.Location;
+            if (!string.IsNullOrEmpty(entryAssembly) && System.IO.File.Exists(entryAssembly))
+            {
+                var stamp = System.IO.File.GetLastWriteTime(entryAssembly)
+                    .ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
+                _console.MarkupLine($"[grey]AntigravityTaskRunner binary built {stamp}[/]");
+            }
+
             var allTasks = new System.Collections.Generic.List<(TaskItem Task, bool Success, TimeSpan Duration)>();
 
             await _console.Progress()
@@ -61,9 +70,19 @@ public class OrchestratorHostedService : IHostedService
                     var mainTask = ctx.AddTask("[green]Orchestrating tasks...[/]");
                     mainTask.IsIndeterminate = true;
 
+                    AntigravityTaskRunner.Core.Models.PipelineHaltReport? haltReport = null;
+
                     void OnTaskStarted(object? sender, TaskItem task)
                     {
                         mainTask.Description = $"[blue]Running:[/] {Markup.Escape(task.DisplayText)}";
+                    }
+
+                    // Live per-phase status (AI processing heartbeats, verification, build,
+                    // tests, pauses) so the UI never appears frozen.
+                    void OnStatusChanged(object? sender, (TaskItem Task, string Status) args)
+                    {
+                        mainTask.Description =
+                            $"[blue]{Markup.Escape(args.Task.DisplayText)}[/] — [grey]{Markup.Escape(args.Status)}[/]";
                     }
 
                     void OnTaskCompleted(object? sender, (TaskItem Task, bool Success, TimeSpan Duration) args)
@@ -73,20 +92,47 @@ public class OrchestratorHostedService : IHostedService
                         _console.MarkupLine($"Task '{Markup.Escape(args.Task.DisplayText)}' {statusStr} in {args.Duration.TotalSeconds:F1}s");
                     }
 
+                    void OnPipelineHalted(object? sender, AntigravityTaskRunner.Core.Models.PipelineHaltReport report)
+                    {
+                        haltReport = report;
+                    }
+
                     _progressTracker.TaskStarted += OnTaskStarted;
+                    _progressTracker.StatusChanged += OnStatusChanged;
                     _progressTracker.TaskCompleted += OnTaskCompleted;
+                    _progressTracker.PipelineHalted += OnPipelineHalted;
 
                     try
                     {
                         await _orchestrator.RunAllAsync(cancellationToken);
                         mainTask.StopTask();
-                        mainTask.Description = "[green]All tasks finished.[/]";
-                        Environment.ExitCode = _progressTracker.TasksFailed > 0 ? 1 : 0;
+                        if (haltReport is not null)
+                        {
+                            mainTask.Description = "[red]Pipeline halted on failure.[/]";
+                            Environment.ExitCode = 2;
+                        }
+                        else
+                        {
+                            mainTask.Description = "[green]All tasks finished.[/]";
+                            Environment.ExitCode = _progressTracker.TasksFailed > 0 ? 1 : 0;
+                        }
                     }
                     finally
                     {
                         _progressTracker.TaskStarted -= OnTaskStarted;
+                        _progressTracker.StatusChanged -= OnStatusChanged;
                         _progressTracker.TaskCompleted -= OnTaskCompleted;
+                        _progressTracker.PipelineHalted -= OnPipelineHalted;
+                    }
+
+                    if (haltReport is not null)
+                    {
+                        _console.WriteLine();
+                        var panel = new Panel(Markup.Escape(haltReport.Describe()))
+                            .Header("[red]Pipeline halted — task NOT skipped[/]")
+                            .Border(BoxBorder.Heavy)
+                            .BorderColor(Color.Red);
+                        _console.Write(panel);
                     }
                 });
 

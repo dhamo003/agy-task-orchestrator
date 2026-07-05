@@ -20,9 +20,25 @@ public class ProcessTerminalSession : ITerminalSession
     private readonly StringBuilder _stdOutBuffer = new();
     private readonly object _outputLock = new();
     private readonly System.Diagnostics.Stopwatch _stopwatch = new();
+
+    // Completed when the underlying process actually exits (driven by the PTY ProcessExited
+    // lifecycle event), so teardown can wait on a real exit signal instead of polling.
+    private readonly TaskCompletionSource _exitTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private volatile bool _processExited;
+
     private bool _disposed;
     private CancellationTokenSource? _readTcs;
     private Task? _readTask;
+
+    // Optional per-task spawn override (one-shot mode). When set, the session launches this
+    // executable/args directly instead of the configured interactive shell.
+    private string? _spawnApp;
+    private IReadOnlyList<string>? _spawnCommandLine;
+    private string? _spawnCwd;
+
+    // Upper bound on how long teardown will wait for a killed process tree to be reaped.
+    // This is a safety net against a hang; the normal path is driven by the real exit event.
+    private static readonly TimeSpan ProcessExitGrace = TimeSpan.FromSeconds(10);
 
     public ProcessTerminalSession(IOptions<RunnerOptions> options, ILogger<ProcessTerminalSession> logger)
     {
@@ -30,27 +46,64 @@ public class ProcessTerminalSession : ITerminalSession
         _logger = logger;
     }
 
+    public void ConfigureSpawn(string app, IReadOnlyList<string> commandLine, string? workingDirectory)
+    {
+        _spawnApp = app;
+        _spawnCommandLine = commandLine;
+        _spawnCwd = workingDirectory;
+    }
+
     public async Task StartAsync(CancellationToken token = default)
     {
-        _logger.LogInformation("Starting terminal session: {ShellPath} {Arguments}", _options.ShellPath, _options.Arguments);
+        // Use the per-task spawn override (one-shot mode) if configured; otherwise launch the
+        // configured interactive shell.
+        var app = !string.IsNullOrWhiteSpace(_spawnApp) ? _spawnApp! : _options.ShellPath;
 
-        var argsArray = string.IsNullOrWhiteSpace(_options.Arguments) 
-            ? Array.Empty<string>() 
-            : new[] { _options.Arguments };
+        string[] argsArray;
+        if (_spawnCommandLine != null)
+        {
+            argsArray = _spawnCommandLine.ToArray();
+        }
+        else
+        {
+            argsArray = string.IsNullOrWhiteSpace(_options.Arguments)
+                ? Array.Empty<string>()
+                : new[] { _options.Arguments };
+        }
+
+        var cwd = !string.IsNullOrWhiteSpace(_spawnCwd) ? _spawnCwd! : Environment.CurrentDirectory;
+
+        _logger.LogInformation("Starting terminal session: {App} {Arguments}", app, string.Join(' ', argsArray));
 
         var ptyOptions = new PtyOptions
         {
-            App = _options.ShellPath,
+            App = app,
             CommandLine = argsArray,
-            Cwd = Environment.CurrentDirectory,
+            Cwd = cwd,
             Environment = _options.EnvironmentVariables.ToDictionary(k => k.Key, v => v.Value),
             ForceWinPty = true,
             Cols = 120,
             Rows = 30
         };
 
-        _pty = await PtyProvider.SpawnAsync(ptyOptions, token);
+        var pty = await PtyProvider.SpawnAsync(ptyOptions, token);
+        _pty = pty;
         _stopwatch.Start();
+
+        // Observe the process lifecycle directly. When the root shell (and therefore the PTY)
+        // exits, complete the exit signal so teardown does not rely on arbitrary delays.
+        pty.ProcessExited += (_, _) =>
+        {
+            _processExited = true;
+            _exitTcs.TrySetResult();
+        };
+
+        // Guard against the race where the process exits before the handler was attached.
+        if (pty.WaitForExit(0))
+        {
+            _processExited = true;
+            _exitTcs.TrySetResult();
+        }
 
         _readTcs = new CancellationTokenSource();
         _readTask = Task.Run(() => ReadOutputAsync(_readTcs.Token), _readTcs.Token);
@@ -74,16 +127,24 @@ public class ProcessTerminalSession : ITerminalSession
                 {
                     _stdOutBuffer.Append(text);
                 }
-                
+
                 // Echo the PTY output to the host console so the user can see the interaction
                 Console.Write(text);
-                
+
                 _logger.LogTrace("PTY OUT: {Data}", text);
             }
         }
         catch (OperationCanceledException)
         {
-            // Expected
+            // Expected when the session is being torn down.
+        }
+        catch (ObjectDisposedException)
+        {
+            // Expected when the reader stream is disposed during teardown.
+        }
+        catch (IOException)
+        {
+            // Expected when the pseudo-console handle is closed underneath the read.
         }
         catch (Exception ex)
         {
@@ -95,7 +156,7 @@ public class ProcessTerminalSession : ITerminalSession
     {
         EnsureProcessStarted();
         _logger.LogTrace("Sending input to terminal: {Input}", input);
-        
+
         var inputBytes = Encoding.UTF8.GetBytes(input + Environment.NewLine);
         await _pty!.WriterStream.WriteAsync(inputBytes.AsMemory(0, inputBytes.Length), token);
         await _pty.WriterStream.FlushAsync(token);
@@ -121,53 +182,138 @@ public class ProcessTerminalSession : ITerminalSession
     {
         EnsureProcessStarted();
 
-        try
+        // Wait for the genuine process exit. The caller's token bounds the wait (e.g. the task
+        // timeout in one-shot mode); cancellation surfaces as OperationCanceledException so the
+        // caller can treat it as a timeout. This is the authoritative completion signal.
+        if (!_processExited)
         {
-            // Simple wait loop since IPtyConnection doesn't have WaitForExitAsync
-            while (!token.IsCancellationRequested && _pty!.WaitForExit(100) == false)
-            {
-                await Task.Delay(100, token);
-            }
-        }
-        catch (TaskCanceledException)
-        {
-            _logger.LogWarning("Wait for exit cancelled.");
-            await KillAsync(CancellationToken.None);
-            throw;
+            await _exitTcs.Task.WaitAsync(token);
         }
 
-        _stopwatch.Stop();
-        
-        // Wait briefly for output buffers to flush
-        await Task.Delay(100, CancellationToken.None);
+        if (_stopwatch.IsRunning)
+        {
+            _stopwatch.Stop();
+        }
 
         var (stdOut, stdErr) = GetCurrentOutput();
+        int exitCode = _processExited ? _pty!.ExitCode : -1;
 
-        return new TerminalSessionResult(
-            _pty!.ExitCode,
-            stdOut,
-            stdErr,
-            _stopwatch.Elapsed
-        );
+        return new TerminalSessionResult(exitCode, stdOut, stdErr, _stopwatch.Elapsed);
     }
 
-    public Task KillAsync(CancellationToken token = default)
+    public async Task KillAsync(CancellationToken token = default)
     {
-        if (_pty != null)
+        var pty = _pty;
+        if (pty == null)
         {
-            _logger.LogInformation("Killing terminal session process.");
-            try
+            return;
+        }
+
+        _logger.LogInformation("Terminating terminal session process tree (PID {Pid}).", pty.Pid);
+
+        // 1. Kill the ENTIRE process tree. pty.Kill() only terminates the root shell (cmd.exe);
+        //    the Antigravity CLI (agy) and any tools it spawned run as separate child processes
+        //    and would otherwise survive teardown and keep running into the next task, producing
+        //    overlapping sessions. taskkill /T terminates the whole tree.
+        await KillProcessTreeAsync(pty.Pid, token);
+
+        // 2. Also close the pseudo-console / root process directly as a fallback.
+        try
+        {
+            pty.Kill();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "PTY Kill() failed (process may already have exited).");
+        }
+
+        // 3. Wait for the OS to actually reap the process so the next session cannot overlap.
+        await WaitForProcessReapAsync(token);
+    }
+
+    /// <summary>
+    /// After a kill, waits for the OS to reap the process using the lifecycle event, bounded by a
+    /// short grace period so teardown can never deadlock even if the exit notification is lost.
+    /// Never throws — teardown must always run to completion.
+    /// </summary>
+    private async Task WaitForProcessReapAsync(CancellationToken token)
+    {
+        var pty = _pty;
+        if (pty == null || _processExited)
+        {
+            return;
+        }
+
+        try
+        {
+            await _exitTcs.Task.WaitAsync(ProcessExitGrace, token);
+        }
+        catch (TimeoutException)
+        {
+            _logger.LogWarning("Timed out waiting for terminal process (PID {Pid}) to exit after kill.", pty.Pid);
+        }
+        catch (OperationCanceledException)
+        {
+            // The bounded teardown wait was cancelled; the kill has already been issued.
+        }
+    }
+
+    /// <summary>
+    /// Forcefully terminates the entire process tree rooted at <paramref name="pid"/>.
+    /// On Windows this uses <c>taskkill /T /F</c> because killing the PTY root shell alone
+    /// leaves child processes (the agy CLI and its subprocesses) orphaned and still running.
+    /// </summary>
+    private async Task KillProcessTreeAsync(int pid, CancellationToken token)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        try
+        {
+            using var proc = System.Diagnostics.Process.Start(CreateTaskKillStartInfo(pid));
+            if (proc != null)
             {
-                _pty.Kill();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to kill PTY process.");
+                await proc.WaitForExitAsync(token);
             }
         }
-        
-        return Task.CompletedTask;
+        catch (OperationCanceledException)
+        {
+            // Bounded teardown was cancelled; the PTY-level kill below still runs.
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "taskkill failed to terminate process tree for PID {Pid}.", pid);
+        }
     }
+
+    private void KillProcessTreeSync(int pid)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        try
+        {
+            using var proc = System.Diagnostics.Process.Start(CreateTaskKillStartInfo(pid));
+            proc?.WaitForExit(5000);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "taskkill (sync) failed to terminate process tree for PID {Pid}.", pid);
+        }
+    }
+
+    private static System.Diagnostics.ProcessStartInfo CreateTaskKillStartInfo(int pid) =>
+        new("taskkill", $"/PID {pid} /T /F")
+        {
+            CreateNoWindow = true,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
 
     private void EnsureProcessStarted()
     {
@@ -179,29 +325,60 @@ public class ProcessTerminalSession : ITerminalSession
 
     public void Dispose()
     {
-        if (_disposed) return;
-        
-        if (_readTcs != null)
+        if (_disposed)
         {
-            _readTcs.Cancel();
-            _readTcs.Dispose();
+            return;
         }
+        _disposed = true;
 
-        if (_pty != null)
+        // Stop the background reader first so it releases the stream.
+        if (_readTcs != null)
         {
             try
             {
-                _pty.Kill();
-                _pty.ReaderStream?.Dispose();
-                _pty.WriterStream?.Dispose();
+                _readTcs.Cancel();
             }
-            catch
+            catch (ObjectDisposedException)
             {
-                // Ignore during disposal
+                // Already disposed.
             }
         }
 
-        _disposed = true;
+        var pty = _pty;
+        if (pty != null)
+        {
+            try
+            {
+                // Dispose is the last-resort safety net. The pipeline normally tears the session
+                // down via KillAsync first; if that did not happen, ensure the whole process tree
+                // is terminated synchronously so no agy process leaks into the next task.
+                if (!_processExited)
+                {
+                    KillProcessTreeSync(pty.Pid);
+                    pty.Kill();
+                    pty.WaitForExit(5000);
+                }
+
+                pty.ReaderStream?.Dispose();
+                pty.WriterStream?.Dispose();
+            }
+            catch
+            {
+                // Ignore errors during disposal.
+            }
+        }
+
+        // Give the background reader a bounded moment to observe cancellation and unwind.
+        try
+        {
+            _readTask?.Wait(1000);
+        }
+        catch (AggregateException)
+        {
+            // Expected: the reader completes via OperationCanceledException on teardown.
+        }
+
+        _readTcs?.Dispose();
         GC.SuppressFinalize(this);
     }
 }

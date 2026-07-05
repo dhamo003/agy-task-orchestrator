@@ -40,7 +40,10 @@ public class MarkdownTaskWriter : ITaskWriter
                         _ => "[ ]"
                     };
 
-                    var regex = new Regex(@"\[[\sXx/!]\]");
+                    // Strip any existing (Reason: ...) suffix
+                    line = Regex.Replace(line, @"\s*\(Reason:.*\)$", "", RegexOptions.IgnoreCase);
+
+                    var regex = new Regex(@"\[[\sXx/!\-]\]");
                     line = regex.Replace(line, marker, 1);
 
                     if (newStatus == TaskStatus.Failed && !string.IsNullOrWhiteSpace(reason))
